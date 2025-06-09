@@ -1,5 +1,5 @@
 {
-  "name": "bsky-post-composer",
+  "name": "bskypost-markpub",
   "version": "0.1.0",
   "private": true,
   "dependencies": {
