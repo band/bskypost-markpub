@@ -10,7 +10,7 @@ function App() {
     const saved = localStorage.getItem('bluesky-post-content');
     return saved || '';
   });
-  const [isAttachmentAdded, setIsAttachmentAdded] = useState<boolean>(false);
+  const [websiteUrl, setWebsiteUrl] = useState<string>('');
   
   // Authentication state
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -19,9 +19,27 @@ function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [agent, setAgent] = useState<AtpAgent | null>(null);
   const [lastPostUrl, setLastPostUrl] = useState<string | null>(null);
+  const [urlPreview, setUrlPreview] = useState<any>(null);
+  const [isLoadingPreview, setIsLoadingPreview] = useState<boolean>(false);
   
-  // Character count and limit
-  const charCount = postContent.length;
+  // Character count and limit (URLs count as 23 chars for Bluesky when embedded)
+  const calculateCharCount = () => {
+    let count = postContent.length;
+    
+    if (websiteUrl.trim()) {
+      const urlToEmbed = websiteUrl.trim();
+      // If URL is not already in the post content, it will be added (and counts as 23 chars when embedded)
+      if (!postContent.includes(urlToEmbed)) {
+        // Add length for line breaks and the URL itself (which will be shortened to 23 chars when embedded)
+        const lineBreaks = postContent.trim() ? 2 : 0; // \n\n if there's existing content
+        count += lineBreaks + 23; // URLs are shortened to 23 chars in Bluesky
+      }
+    }
+    
+    return count;
+  };
+  
+  const charCount = calculateCharCount();
   const remainingChars = MAX_POST_LENGTH - charCount;
   const isOverLimit = remainingChars < 0;
 
@@ -58,15 +76,42 @@ function App() {
     setPostContent(e.target.value);
   };
 
-  // Handle attachment toggle
-  const handleAttachmentToggle = () => {
-    setIsAttachmentAdded(!isAttachmentAdded);
+  // Handle website URL change
+  const handleUrlChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const newUrl = e.target.value;
+    setWebsiteUrl(newUrl);
+    
+    // Clear existing preview if URL is empty
+    if (!newUrl.trim()) {
+      setUrlPreview(null);
+      return;
+    }
+    
+    // Debounce URL preview fetching
+    const timer = setTimeout(async () => {
+      try {
+        // Basic URL validation
+        const url = new URL(newUrl.trim());
+        if (url.protocol === 'http:' || url.protocol === 'https:') {
+          setIsLoadingPreview(true);
+          const metadata = await fetchUrlMetadata(newUrl.trim());
+          setUrlPreview(metadata);
+        }
+      } catch (error) {
+        setUrlPreview(null);
+      } finally {
+        setIsLoadingPreview(false);
+      }
+    }, 1000);
+    
+    return () => clearTimeout(timer);
   };
 
   // Clear the post content
   const handleClear = () => {
     setPostContent('');
-    setIsAttachmentAdded(false);
+    setWebsiteUrl('');
+    setUrlPreview(null);
   };
 
   // Handle authentication
@@ -109,6 +154,18 @@ function App() {
     setLastPostUrl(null);
   };
 
+  // Fetch metadata for URL embedding
+  const fetchUrlMetadata = async (url: string) => {
+    try {
+      const response = await fetch(`https://cardyb.bsky.app/v1/extract?url=${encodeURIComponent(url)}`);
+      if (!response.ok) throw new Error('Failed to fetch metadata');
+      return await response.json();
+    } catch (error) {
+      console.warn('Failed to fetch URL metadata:', error);
+      return null;
+    }
+  };
+
   // Handle post submission
   const handleSubmit = async () => {
     if (isOverLimit || !agent) {
@@ -119,15 +176,53 @@ function App() {
     setIsLoading(true);
     
     try {
-      const response = await agent.post({
+      let postData: any = {
         text: postContent,
         createdAt: new Date().toISOString(),
-      });
+      };
+
+      // If there's a URL, try to embed it with metadata
+      if (websiteUrl.trim()) {
+        const urlToEmbed = websiteUrl.trim();
+        
+        // Add URL to the text if it's not already there
+        let finalText = postContent;
+        if (!postContent.includes(urlToEmbed)) {
+          finalText = postContent.trim() + (postContent.trim() ? '\n\n' : '') + urlToEmbed;
+        }
+        
+        // Try to fetch metadata for rich embedding
+        const metadata = await fetchUrlMetadata(urlToEmbed);
+        
+        if (metadata && metadata.title) {
+          // Create embedded link with metadata
+          postData.embed = {
+            $type: 'app.bsky.embed.external',
+            external: {
+              uri: urlToEmbed,
+              title: metadata.title || '',
+              description: metadata.description || '',
+              thumb: metadata.image ? {
+                $type: 'blob',
+                ref: {
+                  $link: metadata.image
+                },
+                mimeType: 'image/jpeg',
+                size: 0
+              } : undefined
+            }
+          };
+        }
+        
+        postData.text = finalText;
+      }
+      
+      const response = await agent.post(postData);
       
       const postUrl = `https://bsky.app/profile/${agent.session?.did}/post/${response.uri.split('/').pop()}`;
       setLastPostUrl(postUrl);
       setPostContent('');
-      setIsAttachmentAdded(false);
+      setWebsiteUrl('');
       
       alert(`Post successful! URL: ${postUrl}`);
     } catch (error) {
@@ -203,16 +298,55 @@ function App() {
                 </div>
               </div>
               
-              {/* Post controls */}
-              <div className="controls-container">
-                {/* Attachment button */}
-                <button 
-                  className={`control-button ${isAttachmentAdded ? 'active' : ''}`}
-                  onClick={handleAttachmentToggle}
+              {/* Website URL input */}
+              <div className="url-container">
+                <label htmlFor="website-url">Website URL (optional):</label>
+                <textarea
+                  id="website-url"
+                  className="url-textarea"
+                  placeholder="https://example.com"
+                  rows={2}
+                  value={websiteUrl}
+                  onChange={handleUrlChange}
                   disabled={isLoading}
-                >
-                  📎 {isAttachmentAdded ? 'Remove attachment' : 'Add attachment'}
-                </button>
+                />
+                {websiteUrl.trim() && (
+                  <div className="url-char-info">
+                    URLs count as 23 characters
+                  </div>
+                )}
+                
+                {/* URL Preview */}
+                {isLoadingPreview && (
+                  <div className="url-preview loading">
+                    <div className="preview-text">Loading preview...</div>
+                  </div>
+                )}
+                
+                {urlPreview && !isLoadingPreview && (
+                  <div className="url-preview">
+                    <div className="preview-header">Link Preview:</div>
+                    <div className="preview-card">
+                      {urlPreview.image && (
+                        <img 
+                          src={urlPreview.image} 
+                          alt="Link preview" 
+                          className="preview-image"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).style.display = 'none';
+                          }}
+                        />
+                      )}
+                      <div className="preview-content">
+                        <div className="preview-title">{urlPreview.title || 'No title'}</div>
+                        {urlPreview.description && (
+                          <div className="preview-description">{urlPreview.description}</div>
+                        )}
+                        <div className="preview-domain">{websiteUrl}</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
               
               {/* Action buttons */}
